@@ -12,7 +12,7 @@ from os import linesep
 
 class JP_SecurityCrawler:
     def __init__(self, output_all: bool = True, reference_json_filename: str = ""):
-        self.IPO_base_url = "https://www.jpx.co.jp/listing/stocks/new/"
+        self.IPO_base_url = "https://www.jpx.co.jp/listing/stocks/new/"  # the base url from Tokyo exchange
         self.JP_exchange_base = "https://www.jpx.co.jp/"
         self.IPO_col = ["date of listing", "issue name", "code", "outline pdf url", "market segment", "prospectus pdf url", "share price", "issue_name (English name)",
                         "No. of Issued Shares", "No. of Issued Shares (incl. treasury shares)", "Managing Trading Participant", "Public Offering/Secondary Offering",
@@ -22,6 +22,7 @@ class JP_SecurityCrawler:
         self.output_all = output_all
         self.reference_json_filename = reference_json_filename
         if not self.output_all:
+            #  Retrieving the searched IPO tickers
             self.searched_history = self.read_tickers_list(json_filename=self.reference_json_filename)
 
     @staticmethod
@@ -130,39 +131,65 @@ class JP_SecurityCrawler:
 
     def prospectus_pdf_parser_v2(self, pdf_url):
         def extract_text_by_page(pdf_path):
+            """
+            This function is to convert the entire pdf to text, will output per page with generator
+            :param pdf_path:
+            :return: generator
+            """
             request = urllib.request.Request(pdf_path)
 
             response = urllib.request.urlopen(request).read()
             fb = BytesIO(response)
 
+            #  converting the entire pdf to text base
             for page_number, page_object in enumerate(PDFPage.get_pages(fb, caching=True, check_extractable=True), 1):  # page number starting from 1
                 resource_manager = PDFResourceManager()
                 fake_file_handle = StringIO()
                 converter = TextConverter(resource_manager, fake_file_handle)
                 page_interpreter = PDFPageInterpreter(resource_manager, converter)
                 page_interpreter.process_page(page_object)
-
                 text = fake_file_handle.getvalue()
                 yield page_number, text
-
+                # close the handler when the page is read
                 converter.close()
                 fake_file_handle.close()
 
         prospectus_pdf_summary_dict = {
             "Shareholders – Holding stake": []
         }
-
-        for page_number, page_text in extract_text_by_page(pdf_url):
-            if "大株主の状況" in page_text:
+        table_end = False  # a flag to break the for loop
+        for page_number, page_text in extract_text_by_page(pdf_url):  # loop thought the pdf to text by generator function
+            if "株主の状況" in page_text:  # find the key header word of the table
                 tables = camelot.read_pdf(pdf_url, pages=f'{page_number}')
                 for table in tables:
                     df = table.df
                     new_header = df.iloc[0]
                     df = df[1:]
                     df.columns = new_header
-                    if "氏名又は名称" in df.columns:
-                        prospectus_pdf_summary_dict["Shareholders – Holding stake"] = [f"{name.replace(linesep, '')} {share}" for name, share in zip(df.iloc[:-1, 0].to_list(), df.iloc[:-1, 2].to_list())]
-                        break
+                    if "氏名又は名称" in df.columns:  # target table is found
+                        for name, share in zip(df.iloc[:, 0].to_list(), df.iloc[:, 2].to_list()):
+                            if "計" not in name:
+                                prospectus_pdf_summary_dict["Shareholders – Holding stake"].append(f"{name.replace(linesep, '')} {share}")
+                            else:
+                                table_end = True
+                                break
+                        while not table_end:
+                            page_number += 1
+                            tables = camelot.read_pdf(pdf_url, pages=f'{page_number}')
+                            df = tables[0].df
+                            new_header = df.iloc[0]
+                            df = df[1:]
+                            df.columns = new_header
+                            if "氏名又は名称" in df.columns:
+                                for name, share, percent in zip(df.iloc[:, 0].to_list(), df.iloc[:, 2].to_list(), df.iloc[:, 3].to_list()):
+                                    if ("計" in name) or ("100" in percent):
+                                        table_end = True
+                                        break
+                                        # print('pending')
+                                    else:
+                                        prospectus_pdf_summary_dict["Shareholders – Holding stake"].append(f"{name.replace(linesep, '')} {share}")
+            if table_end:  # break the for loop if the table is obtained
+                break
         return prospectus_pdf_summary_dict
 
     def prospectus_pdf_parser(self, pdf_url):
@@ -211,6 +238,9 @@ class JP_SecurityCrawler:
         if not self.output_all:
             for ipo in all_ipo_list:
                 ticker = ipo['issue name']
+                share_price = ipo['share price']
+                if not (ticker and share_price):
+                    continue
                 if ticker not in self.searched_history:
                     IPO_result_list.append(ipo)
                     self.searched_history.append(ticker)
@@ -242,83 +272,8 @@ class JP_SecurityCrawler:
 
 if __name__ == "__main__":
     crawler = JP_SecurityCrawler(output_all=False, reference_json_filename="searched_ipo.json")
-
-
     all_ipo = crawler.run(to_csv=True, csv_filename='ipo_test.csv')
     from pprint import pprint
 
     pprint(all_ipo)
     pass
-
-
-## test code
-# from pdfminer.converter import TextConverter
-# from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
-# from pdfminer.pdfpage import PDFPage
-# import urllib.request
-#
-#
-# def extract_text_by_page(pdf_path):
-#     request = urllib.request.Request(pdf_path)
-#
-#     response = urllib.request.urlopen(request).read()
-#     fb = BytesIO(response)
-#
-#     for page_number, page_object in enumerate(PDFPage.get_pages(fb, caching=True, check_extractable=True), 1):  # page number starting from 1
-#         resource_manager = PDFResourceManager()
-#         fake_file_handle = StringIO()
-#         converter = TextConverter(resource_manager, fake_file_handle)
-#         page_interpreter = PDFPageInterpreter(resource_manager, converter)
-#         page_interpreter.process_page(page_object)
-#
-#         text = fake_file_handle.getvalue()
-#         yield page_number, text
-#
-#         converter.close()
-#         fake_file_handle.close()
-#
-#     # with open(pdf_path) as fh:
-#     #     for page_number, page_object in enumerate(PDFPage.get_pages(fh,caching=True,check_extractable=True)):
-#     #
-#     #         resource_manager = PDFResourceManager()
-#     #         fake_file_handle = io.StringIO()
-#     #         converter = TextConverter(resource_manager, fake_file_handle)
-#     #         page_interpreter = PDFPageInterpreter(resource_manager, converter)
-#     #         page_interpreter.process_page(page_object)
-#     #
-#     #         text = fake_file_handle.getvalue()
-#     #         yield page_number, text
-#     #
-#     #         converter.close()
-#     #         fake_file_handle.close()
-#
-#
-# def extract_text(pdf_path):
-#     for page_number, page_text in extract_text_by_page(pdf_path):
-#         if "大株主の状況" in page_text:
-#             tables = camelot.read_pdf('https://www.jpx.co.jp/listing/stocks/new/nlsgeu00000619cc-att/01NIPPONEXPRESSHOLDINGS-1s.pdf', pages=f'{page_number}')
-#             for table in tables:
-#                 df = table.df
-#                 new_header = df.iloc[0]
-#                 df = df[1:]
-#                 df.columns = new_header
-#                 if "氏名又は名称" in df.columns:
-#                     print ([f"{name.replace(linesep,'')} {share}" for name, share in zip(df.iloc[:-1, 0].to_list(), df.iloc[:-1, 2].to_list())])
-#
-#
-#
-#
-#
-# print(extract_text(pdf_path='https://www.jpx.co.jp/listing/stocks/new/nlsgeu00000619cc-att/01NIPPONEXPRESSHOLDINGS-1s.pdf'))
-# # from pdfminer.high_level import extract_text
-# # extract_text('test.pdf')
-# # tables = camelot.read_pdf('https://www.jpx.co.jp/listing/stocks/new/nlsgeu00000619cc-att/01NIPPONEXPRESSHOLDINGS-1s.pdf', pages='39')
-# #
-# # for table in tables:
-# #     df = table.df
-# #     new_header = df.iloc[0]
-# #     df = df[1:]
-# #     df.columns = new_header
-# #     if "氏名又は名称" in df.columns:
-# #         print (df.iloc[:-1, 0].to_list())
-# #
